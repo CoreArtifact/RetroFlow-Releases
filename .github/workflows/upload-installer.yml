@@ -1,0 +1,58 @@
+name: Upload audited installer
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+      artifact_ref:
+        required: true
+      sha256:
+        required: true
+permissions:
+  contents: write
+jobs:
+  upload:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate installer reference
+        env:
+          TAG: ${{ inputs.tag }}
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$ARTIFACT_REF" == "codex/release-upload-$TAG" ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.artifact_ref }}
+      - name: Reassemble and verify the audited installer
+        env:
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          python - <<'PY'
+          import hashlib,json,os,re,zipfile
+          from pathlib import Path
+          manifest=json.loads(Path('.release-upload/manifest.json').read_text())
+          assert manifest['sha256']==os.environ['EXPECTED_SHA256']
+          assert 0<len(manifest['parts'])<=128
+          target=Path('RetroFlow-PPSA99777.exfat.zip')
+          with target.open('wb') as output:
+              for part in manifest['parts']:
+                  assert re.fullmatch(r'part-\d{3}\.bin',part['name'])
+                  data=Path('.release-upload',part['name']).read_bytes()
+                  assert len(data)<=4*1024*1024
+                  assert hashlib.sha256(data).hexdigest()==part['sha256']
+                  output.write(data)
+          assert target.stat().st_size==manifest['size']
+          assert hashlib.sha256(target.read_bytes()).hexdigest()==os.environ['EXPECTED_SHA256']
+          with zipfile.ZipFile(target) as package:
+              assert package.namelist()==['RetroFlow-PPSA99777.exfat']
+              assert package.testzip() is None
+          PY
+      - name: Upload to the existing unpublished release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" RetroFlow-PPSA99777.exfat.zip --repo "$GITHUB_REPOSITORY"
